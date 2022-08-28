@@ -1,0 +1,143 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+struct transform
+{
+    float4 rotation;
+    float3 position;
+    float3 scale;
+    float pushDistance;
+};
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+float xSize;
+float time;
+float numPushers;
+float3 cameraPosition;
+float3 cameraForward;
+float3 cameraRight;
+RWStructuredBuffer<transform> positionBuffer;
+//first 3 location, last radius
+RWStructuredBuffer<float4> grassPushers;
+//RWStructuredBuffer<float> heightMap;
+
+float SphereSDF(float3 position, float3 centre, float radius)
+{
+    position -= centre;
+    return length(position) - radius;
+
+}
+
+float SpheresSDF(float3 position)
+{
+    float distance = 9999999.;
+    for (int i = 0; i < numPushers; i++)
+    {
+        distance = min(distance, SphereSDF(position, grassPushers[i].xyz, grassPushers[i].w) / grassPushers[i].w);
+    }
+    return distance;
+
+}
+
+
+float PseudoRandomNumber(float i, float j)
+{
+    float u = 50. * frac(i / radians(180.));
+    float v = 50. * frac(j / radians(180.));
+    return 2. * frac(u * v * (u + v)) - 1.;
+}
+
+float4 GetCornerValues(float i, float j)
+{
+    float a = PseudoRandomNumber(i, j);
+    float b = PseudoRandomNumber(i + 1., j);
+    float c = PseudoRandomNumber(i, j + 1.);
+    float d = PseudoRandomNumber(i + 1., j + 1.);
+    return float4(a, b, c, d);
+}
+
+//substitute function for smoothstep for our noise
+float S(float l)
+{
+    return 3. * pow(l, 2.) - 2. * pow(l, 3.);
+}
+
+//2D gradient noise function
+float GetNoise(float x, float z, float scale)
+{
+    //we are dividing the place up into a grid based on scale
+    x *= scale;
+    z *= scale;
+    float i = floor(x);
+    float j = floor(z);
+    float4 cornerValues = GetCornerValues(i, j);
+    return cornerValues.x +
+        (cornerValues.y - cornerValues.x) * S(x - i) +
+        (cornerValues.z - cornerValues.x) * S(z - j) +
+        (cornerValues.x - cornerValues.y - cornerValues.z + cornerValues.w) * S(x - i) * S(z - j);
+
+
+}
+
+
+//a hamilton product method, left for future use if needed
+float4 HamiltonProduct(float4 a, float4 b)
+{
+    return float4(
+    a.x * b.x - a.y * b.y - a.z * b.z - a.w * b.w,
+    a.x*b.y+a.y*b.x+a.z*b.w-a.w*b.y,
+    a.x*b.z-a.y*b.w+a.z*b.x+a.w*b.y,
+    a.x*b.w+a.y*b.z-a.z*b.y+a.w*b.x
+);
+
+}
+
+float3 GetLocation(float num)
+{
+    //if we are on row x of the frustum, and the frustum increases by 3
+    float rowNum = 0;
+    float numOnRow = 4;
+    float colNum = 0;
+    //a magic number that represents fov
+    float increaseNumber = 1.25;
+    //work out what row of the frustum this lies in
+    while (num > numOnRow)
+    {
+        num -= floor(numOnRow);
+        numOnRow += increaseNumber;
+        //this is increased by less than one so no tiles are skipped due to diagonals across pixels
+        //unfortunately this results in duplicate grass blades(not visible) and therefore fewer overall.
+        rowNum += 0.5;
+    }
+
+    //calculate exact position
+    float3 position = cameraPosition + cameraForward * rowNum;
+    position += cameraRight * (num - (numOnRow / 2.));
+    position = round(position);
+    return position;
+    
+}
+
+[numthreads(128,1,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+
+    
+    // TODO: insert actual code here!
+    
+    
+    //float3 position = float3(id.x + (GetNoise(id.x, id.y, 1) - 0.5), heightMap[id.y * xSize + id.x] * 600, id.y + (GetNoise(id.x + 500, id.y + 500, 1) - 0.5));
+    //the number I multiply id.x by has to be less than 1/root2 in order for it not be possible to skip a pixel I would think but its still not working so make it even lower
+    float3 position = GetLocation(id.x);
+    position += float3((GetNoise(position.x, position.z, 1) - 0.5), 0, (GetNoise(position.x + 500, position.z + 500, 1) - 0.5));
+
+    
+    positionBuffer[id.x].position = position;
+    
+    float rand = PseudoRandomNumber(position.x, position.z)*90;
+    float cosA = cos(rand);
+    float sinA = sin(rand);
+    positionBuffer[id.x].pushDistance = SpheresSDF(position);
+    positionBuffer[id.x].rotation = float4(0, sinA,0, cosA);
+    positionBuffer[id.x].scale = float3(1, 4 * ((rand / 180) + 1), 1) * .25;
+
+}
